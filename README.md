@@ -44,6 +44,33 @@ stored normally and the OTLP response reports the rejection count:
 Rejection reasons: `capacity`, `window_closed`, `span_limit`, `invalid_span`.
 A fully accepted export returns `{}` per the OTLP spec.
 
+### Durability and crash recovery
+
+A batch is acknowledged only after every admitted span and its window state
+have been committed to SQLite (`staged_spans` + `windows` tables, next to the
+archive). If that staging write fails, the whole batch is rolled back — no
+window is opened or extended, no slot is taken — and the export receives
+**HTTP 503** so the exporter can retry.
+
+If the process is killed (`kill -9`, OOM, node reboot) and restarted on the
+same volume, the sampler rebuilds its state from the database before serving
+requests:
+
+* **Collecting windows** keep their original deadline and every acknowledged
+  span: they keep collecting, de-duplication still applies, and spans arriving
+  after the original deadline are rejected as usual.
+* **Windows that expired while the process was down** are decided on boot by
+  the usual rule — archived if they contain an ERROR span, dropped otherwise.
+* **Traces waiting to be written** are archived automatically after the
+  restart. The archive commit, the removal of the staged spans and the
+  window's closed marker land in one transaction, so a window is re-written
+  after a crash that happened before the commit and is never archived twice
+  after one that happened later.
+* **Recently closed trace ids** stay rejected for late spans.
+
+The overview page reflects the recovered state: occupied slots, traces still
+collecting, writes still pending, and every archive already on the volume.
+
 ### Pause / resume
 
 Archiving can be paused from the page or via `POST /api/archive/pause`. Traces
@@ -60,8 +87,11 @@ docker compose up --build
 # open http://localhost:8000
 ```
 
-Data is persisted in the `sampler-data` volume. Environment overrides can be
-set in a `.env` file next to `docker-compose.yml`:
+Data is persisted in the `sampler-data` volume. Killing or replacing the
+container and starting it again on the same volume resumes every in-flight
+window and pending write exactly where it stopped (see *Durability and crash
+recovery* above). Environment overrides can be set in a `.env` file next to
+`docker-compose.yml`:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -121,8 +151,8 @@ Only OTLP/HTTP JSON is decoded; protobuf exports receive HTTP 415.
 
 ```
 app/otlp.py      OTLP/HTTP JSON parsing and response shaping
-app/sampler.py   window/slot state machine, dedupe, cap, pause, retry
-app/storage.py   transactional SQLite archive
+app/sampler.py   window/slot state machine, dedupe, cap, pause, retry, recovery
+app/storage.py   transactional SQLite archive + durable ingest staging
 app/main.py      FastAPI app factory, routes, templates
-tests/           sampler unit tests and HTTP-level tests
+tests/           sampler unit tests, HTTP-level tests, crash-recovery tests
 ```

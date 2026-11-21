@@ -32,11 +32,11 @@ class FailingStore(ArchiveStore):
         self.fail = True
         self.attempts = 0
 
-    def write_trace(self, trace_id, spans):  # noqa: D401
+    def write_trace(self, trace_id, spans, **kwargs):  # noqa: D401
         self.attempts += 1
         if self.fail:
             raise RuntimeError("disk full")
-        return super().write_trace(trace_id, spans)
+        return super().write_trace(trace_id, spans, **kwargs)
 
 
 @pytest.fixture()
@@ -287,7 +287,7 @@ def test_visibility_only_after_complete_write(store, clock):
     """A trace is invisible on the overview until its commit has finished."""
 
     class SlowStore(ArchiveStore):
-        def write_trace(self, trace_id, spans):
+        def write_trace(self, trace_id, spans, **kwargs):
             raise RuntimeError("locked")
 
     slow = SlowStore(store.path)

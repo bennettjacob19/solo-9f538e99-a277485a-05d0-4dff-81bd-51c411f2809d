@@ -21,6 +21,7 @@ from .sampler import (
     DEFAULT_CAPACITY,
     DEFAULT_MAX_SPANS,
     DEFAULT_WINDOW_SECONDS,
+    StagingError,
     TraceSampler,
 )
 from .storage import ArchiveStore
@@ -195,7 +196,16 @@ def create_app(
                 status_code=400, content=export_response(0, str(exc))
             )
 
-        result = sampler.ingest(spans, invalid=invalid)
+        try:
+            result = sampler.ingest(spans, invalid=invalid)
+        except StagingError as exc:
+            # The batch could not be persisted, so nothing in it counts: no
+            # window was opened or extended and no slot was taken.  The
+            # exporter can retry the whole batch.
+            log.warning("ingest rejected, staging failed: %s", exc)
+            return JSONResponse(
+                status_code=503, content=export_response(0, str(exc))
+            )
         if result.rejected:
             detail = ", ".join(
                 f"{reason}={count}" for reason, count in sorted(result.reasons.items())
